@@ -139,8 +139,10 @@ function compareSchemas(
 
   // Handle string constraints
   if (baseType === 'string') {
-    if (baseline.enum && candidate.enum) {
-      const removedEnums = baseline.enum.filter((v: any) => !candidate.enum.includes(v));
+    const baseEnum = baseline.enum;
+    const candEnum = candidate.enum;
+    if (baseEnum && candEnum) {
+      const removedEnums = baseEnum.filter((v: any) => !candEnum.includes(v));
       if (removedEnums.length > 0) {
         changes.push({
           path,
@@ -149,7 +151,7 @@ function compareSchemas(
           suggestedBump: 'major',
         });
       }
-      const addedEnums = candidate.enum.filter((v: any) => !baseline.enum.includes(v));
+      const addedEnums = candEnum.filter((v: any) => !baseEnum.includes(v));
       if (addedEnums.length > 0) {
         changes.push({
           path,
