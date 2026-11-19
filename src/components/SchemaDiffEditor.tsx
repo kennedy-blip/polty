@@ -120,7 +120,7 @@ export function SchemaDiffEditor({ baselineSchema, candidateSchema, onAudit }: S
         {mutationButtons.map((btn, i) => (
           <button
             key={i}
-            onClick={btn.action}
+            onClick={() => applyMutation(btn.mutation)}
             className="text-xs px-2 py-1 bg-[0f172a] border border-[1e293b] rounded text-cyan-400 hover:bg-cyan-500/20"
           >
             {btn.label}
