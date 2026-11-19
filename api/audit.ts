@@ -1,121 +1,196 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import type { AuditRequest, AuditResult, SchemaChange, SemVerBump, Severity } from '../src/types';
 
-function getPrimitiveType(value: any): string {
-  if (value === null) return 'null';
-  if (Array.isArray(value)) return 'array';
-  return typeof value;
+interface JsonSchema {
+  type?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  enum?: any[];
+  format?: string;
+  minimum?: number;
+  maximum?: number;
+  [key: string]: any;
+}
+
+function getSchemaType(schema: JsonSchema): string {
+  return schema.type || 'object';
+}
+
+function isRequiredField(schema: JsonSchema, fieldName: string): boolean {
+  return schema.required?.includes(fieldName) ?? false;
 }
 
 function compareSchemas(
-  baseline: any,
-  candidate: any,
+  baseline: JsonSchema,
+  candidate: JsonSchema,
   path: string,
   strictMode: boolean,
   changes: SchemaChange[]
 ): void {
-  if (baseline === undefined && candidate === undefined) return;
+  const baseType = getSchemaType(baseline);
+  const candType = getSchemaType(candidate);
 
-  // Field removed
-  if (baseline !== undefined && candidate === undefined) {
+  // Type changed
+  if (baseType !== candType) {
     changes.push({
       path,
       severity: 'BREAKING',
-      description: `Field '${path}' removed from schema`,
+      description: `Type changed from ${baseType} to ${candType} at '${path}'`,
       suggestedBump: 'major',
     });
     return;
   }
 
-  // Field added
-  if (baseline === undefined && candidate !== undefined) {
-    changes.push({
-      path,
-      severity: 'NON_BREAKING',
-      description: `Field '${path}' added to schema`,
-      suggestedBump: 'minor',
-    });
-    return;
-  }
+  // Handle objects
+  if (baseType === 'object') {
+    const baseProps = baseline.properties || {};
+    const candProps = candidate.properties || {};
+    const baseRequired = baseline.required || [];
+    const candRequired = candidate.required || [];
 
-  // Both exist — compare types
-  const baselineType = getPrimitiveType(baseline);
-  const candidateType = getPrimitiveType(candidate);
+    // Check for removed properties
+    for (const key of Object.keys(baseProps)) {
+      if (!(key in candProps)) {
+        const severity = isRequiredField(baseline, key) ? 'BREAKING' : 'DEPRECATION';
+        changes.push({
+          path: `${path}.${key}`,
+          severity,
+          description: `${isRequiredField(baseline, key) ? 'Required' : 'Optional'} field '${key}' removed from '${path}'`,
+          suggestedBump: severity === 'BREAKING' ? 'major' : 'minor',
+        });
+      }
+    }
 
-  if (baselineType !== candidateType) {
-    changes.push({
-      path,
-      severity: 'BREAKING',
-      description: `Type changed from ${baselineType} to ${candidateType} at '${path}'`,
-      suggestedBump: 'major',
-    });
-    return;
-  }
+    // Check for added properties
+    for (const key of Object.keys(candProps)) {
+      if (!(key in baseProps)) {
+        const isRequired = candRequired.includes(key);
+        changes.push({
+          path: `${path}.${key}`,
+          severity: isRequired ? 'BREAKING' : 'NON_BREAKING',
+          description: `${isRequired ? 'Required' : 'Optional'} field '${key}' added to '${path}'`,
+          suggestedBump: isRequired ? 'major' : 'minor',
+        });
+      }
+    }
 
-  // Both are objects — recurse
-  if (baselineType === 'object' && candidateType === 'object') {
-    const baseKeys = Object.keys(baseline);
-    const candKeys = Object.keys(candidate);
+    // Recurse into common properties
+    for (const key of Object.keys(baseProps)) {
+      if (key in candProps) {
+        compareSchemas(baseProps[key], candProps[key], `${path}.${key}`, strictMode, changes);
+      }
+    }
 
-    // Check for removed keys
-    for (const key of baseKeys) {
-      if (!candKeys.includes(key)) {
+    // Check for required field changes (field exists but required status changed)
+    for (const key of baseRequired) {
+      if (key in candProps && !candRequired.includes(key)) {
         changes.push({
           path: `${path}.${key}`,
           severity: 'BREAKING',
-          description: `Required field '${key}' removed from '${path}'`,
+          description: `Required field '${key}' made optional at '${path}'`,
           suggestedBump: 'major',
         });
       }
     }
-
-    // Check for added keys
-    for (const key of candKeys) {
-      if (!baseKeys.includes(key)) {
+    for (const key of candRequired) {
+      if (key in baseProps && !baseRequired.includes(key)) {
         changes.push({
           path: `${path}.${key}`,
-          severity: 'NON_BREAKING',
-          description: `Optional field '${key}' added to '${path}'`,
-          suggestedBump: 'minor',
+          severity: 'BREAKING',
+          description: `Optional field '${key}' made required at '${path}'`,
+          suggestedBump: 'major',
         });
-      }
-    }
-
-    // Recurse into common keys
-    for (const key of baseKeys) {
-      if (candKeys.includes(key)) {
-        compareSchemas(baseline[key], candidate[key], `${path}.${key}`, strictMode, changes);
       }
     }
   }
 
-  // Both are arrays — compare items
-  if (baselineType === 'array' && candidateType === 'array') {
-    const baseItems = baseline;
-    const candItems = candidate;
+  // Handle arrays
+  if (baseType === 'array') {
+    const baseItems = baseline.items;
+    const candItems = candidate.items;
 
-    if (baseItems.length > 0 && candItems.length > 0) {
-      compareSchemas(baseItems[0], candItems[0], `${path}[0]`, strictMode, changes);
+    if (baseItems && candItems) {
+      compareSchemas(baseItems, candItems, `${path}[0]`, strictMode, changes);
     }
 
-    if (candItems.length < baseItems.length) {
+    // Check minItems/maxItems constraints
+    if (baseline.minItems !== undefined && candidate.minItems !== undefined) {
+      if (candidate.minItems > baseline.minItems) {
+        changes.push({
+          path,
+          severity: 'BREAKING',
+          description: `minItems increased from ${baseline.minItems} to ${candidate.minItems} at '${path}'`,
+          suggestedBump: 'major',
+        });
+      }
+    }
+    if (baseline.maxItems !== undefined && candidate.maxItems !== undefined) {
+      if (candidate.maxItems < baseline.maxItems) {
+        changes.push({
+          path,
+          severity: 'BREAKING',
+          description: `maxItems decreased from ${baseline.maxItems} to ${candidate.maxItems} at '${path}'`,
+          suggestedBump: 'major',
+        });
+      }
+    }
+  }
+
+  // Handle string constraints
+  if (baseType === 'string') {
+    if (baseline.enum && candidate.enum) {
+      const removedEnums = baseline.enum.filter((v: any) => !candidate.enum.includes(v));
+      if (removedEnums.length > 0) {
+        changes.push({
+          path,
+          severity: 'BREAKING',
+          description: `Enum values removed: ${removedEnums.join(', ')} at '${path}'`,
+          suggestedBump: 'major',
+        });
+      }
+      const addedEnums = candidate.enum.filter((v: any) => !baseline.enum.includes(v));
+      if (addedEnums.length > 0) {
+        changes.push({
+          path,
+          severity: 'NON_BREAKING',
+          description: `Enum values added: ${addedEnums.join(', ')} at '${path}'`,
+          suggestedBump: 'minor',
+        });
+      }
+    }
+    if (baseline.format && candidate.format && baseline.format !== candidate.format) {
       changes.push({
         path,
         severity: 'BREAKING',
-        description: `Array length reduced from ${baseItems.length} to ${candItems.length} at '${path}'`,
+        description: `Format changed from ${baseline.format} to ${candidate.format} at '${path}'`,
         suggestedBump: 'major',
       });
     }
   }
 
-  // Primitive type mismatch (string -> number, etc.)
-  if (baselineType !== 'object' && baselineType !== 'array' && baselineType !== candidateType) {
-    changes.push({
-      path,
-      severity: 'BREAKING',
-      description: `Type narrowed from ${baselineType} to ${candidateType} at '${path}'`,
-      suggestedBump: 'major',
-    });
+  // Handle number constraints
+  if (baseType === 'number' || baseType === 'integer') {
+    if (baseline.minimum !== undefined && candidate.minimum !== undefined) {
+      if (candidate.minimum > baseline.minimum) {
+        changes.push({
+          path,
+          severity: 'BREAKING',
+          description: `Minimum value increased from ${baseline.minimum} to ${candidate.minimum} at '${path}'`,
+          suggestedBump: 'major',
+        });
+      }
+    }
+    if (baseline.maximum !== undefined && candidate.maximum !== undefined) {
+      if (candidate.maximum < baseline.maximum) {
+        changes.push({
+          path,
+          severity: 'BREAKING',
+          description: `Maximum value decreased from ${baseline.maximum} to ${candidate.maximum} at '${path}'`,
+          suggestedBump: 'major',
+        });
+      }
+    }
   }
 }
 
@@ -137,7 +212,7 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const changes: SchemaChange[] = [];
-  compareSchemas(baselineSchema, candidateSchema, '$', strictMode, changes);
+  compareSchemas(baselineSchema as any, candidateSchema as any, '$', strictMode, changes);
 
   const suggestedBump = calculateSuggestedBump(changes);
   const gateStatus = changes.some(c => c.severity === 'BREAKING') ? 'BLOCK' : 'PASS';
