@@ -7,6 +7,8 @@ export interface SchemaDiffEditorProps {
   onAudit: (result: AuditResult) => void;
 }
 
+type MutationType = 'remove-required' | 'narrow-type' | 'add-optional';
+
 export function SchemaDiffEditor({ baselineSchema, candidateSchema, onAudit }: SchemaDiffEditorProps) {
   const [candidate, setCandidate] = useState<string>(candidateSchema ? JSON.stringify(candidateSchema, null, 2) : '{}');
   const [loading, setLoading] = useState(false);
@@ -37,10 +39,44 @@ export function SchemaDiffEditor({ baselineSchema, candidateSchema, onAudit }: S
     }
   };
 
-  const mutationButtons = [
-    { label: 'Remove Required Field', action: () => {} },
-    { label: 'Narrow Type String->Number', action: () => {} },
-    { label: 'Add Optional Field', action: () => {} },
+  const applyMutation = (mutation: MutationType) => {
+    try {
+      const parsed = JSON.parse(candidate);
+      const next = JSON.parse(JSON.stringify(parsed));
+
+      if (mutation === 'remove-required') {
+        if (Array.isArray(next.required) && next.required.length > 0) {
+          const fieldToRemove = next.required[0];
+          delete next.required;
+          delete next.properties?.[fieldToRemove];
+        }
+      }
+
+      if (mutation === 'narrow-type') {
+        const stringProps = Object.entries(next.properties || {}).filter(
+          ([, v]: any) => v?.type === 'string'
+        );
+        if (stringProps.length > 0) {
+          const [field] = stringProps[0];
+          next.properties[field].type = 'number';
+        }
+      }
+
+      if (mutation === 'add-optional') {
+        next.properties = next.properties || {};
+        next.properties['optionalNewField'] = { type: 'string', description: 'Optional new field added' };
+      }
+
+      setCandidate(JSON.stringify(next, null, 2));
+    } catch (e: any) {
+      setError('Mutation failed: ' + e.message);
+    }
+  };
+
+  const mutationButtons: { label: string; mutation: MutationType }[] = [
+    { label: 'Remove Required Field', mutation: 'remove-required' },
+    { label: 'Narrow Type String->Number', mutation: 'narrow-type' },
+    { label: 'Add Optional Field', mutation: 'add-optional' },
   ];
 
   return (
